@@ -299,6 +299,16 @@ struct RestrictEventsPolicy {
 				procBlacklist[i++] = (char *)"/System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd";
 			}
 		}
+		
+		// Telemetry plugin panics on systems without SSE 4.2 (for Intel: Penryn and older) on Mojave and newer
+		UInt32 c;
+		bool hasSSE42 = (CPUInfo::getCpuid(1, 0, nullptr, nullptr, &c) && (c & CPUInfo::bit_SSE42)) != 0;
+		if ((!hasSSE42 && strstr(value, "auto", strlen("auto"))) || strstr(value, "telemetry", strlen("telemetry"))) {
+			if (getKernelVersion() >= KernelVersion::Mojave) {
+				DBGLOG("rev", "disabling telemetry plugin");
+				procBlacklist[i++] = (char *)"/System/Library/UserEventPlugins/com.apple.telemetry.plugin/Contents/MacOS/com.apple.telemetry";
+			}
+		}
 
 		for (auto &proc : procBlacklist) {
 			if (proc == nullptr) break;
@@ -458,7 +468,8 @@ struct RestrictEventsPolicy {
 	 */
 	mac_policy_ops policyOps {
 		.mpo_policy_initbsd = policyInitBSD,
-		.mpo_vnode_check_exec = policyCheckExecve
+		.mpo_vnode_check_exec = policyCheckExecve,
+		.mpo_vnode_check_open = reinterpret_cast<mpo_vnode_check_open_t *>(policyCheckExecve)
 	};
 
 	/**
