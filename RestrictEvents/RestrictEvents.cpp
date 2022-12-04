@@ -76,7 +76,12 @@ static pmCallBacks_t pmCallbacks;
 static uint8_t findDiskArbitrationPatch[] = { 0x83, 0xF8, 0x02 };
 static uint8_t replDiskArbitrationPatch[] = { 0x83, 0xF8, 0x0F };
 
-const char *procBlacklist[10] = {};
+struct PolicyCallback {
+	const char *path;
+	int (*callback)(const char *path, struct vnode *vp);
+};
+
+PolicyCallback *procBlacklist[10] = {};
 
 struct RestrictEventsPolicy {
 
@@ -94,9 +99,8 @@ struct RestrictEventsPolicy {
 
 			for (auto &proc : procBlacklist) {
 				if (proc == nullptr) break;
-				if (strcmp(pathbuf, proc) == 0) {
-					DBGLOG("rev", "restricting process %s", pathbuf);
-					return EPERM;
+				if (strcmp(pathbuf, proc->path) == 0) {
+					return proc->callback((const char *)&pathbuf, vp);
 				}
 			}
 		}
@@ -259,6 +263,33 @@ struct RestrictEventsPolicy {
 		DBGLOG("rev", "requested to patch CPU name to %s", brandStr);
 		return true;
 	}
+	
+	static int genericBlockCallback(const char *path, struct vnode *vn) {
+		DBGLOG("rev", "restricting process %s", path);
+		return EPERM;
+	}
+	
+	static int mediaBlockCallback(const char *path, struct vnode *vn) {
+		proc_t process = proc_self();
+		char parentProcName[512] { 0 };
+		
+		proc_name(proc_ppid(process), (char *)&parentProcName, sizeof(parentProcName));
+		
+		if (strstr((char *)&parentProcName, "photoanalysisd", strlen("photoanalysisd"))) {
+			proc_rele(process);
+			DBGLOG("rev", "restricting process %s spawned by photoanalysisd", path);
+			return EPERM;
+		}
+		
+		proc_rele(process);
+		return 0;
+	}
+	
+	static PolicyCallback pciBlock;
+	static PolicyCallback memBlock;
+	static PolicyCallback gmuxBlock;
+	static PolicyCallback mediaBlock;
+	static PolicyCallback telemetryBlock;
 
 	static void getBlockedProcesses(BaseDeviceInfo *info) {
 		// Updates procBlacklist with list of processes to block
@@ -278,8 +309,16 @@ struct RestrictEventsPolicy {
 			if (strstr(value, "pci", strlen("pci")) || strstr(value, "auto", strlen("auto"))) {
 				if (getKernelVersion() >= KernelVersion::Catalina) {
 					DBGLOG("rev", "disabling PCIe & memory notifications");
-					procBlacklist[i++] = (char *)"/System/Library/CoreServices/ExpansionSlotNotification";
-					procBlacklist[i++] = (char *)"/System/Library/CoreServices/MemorySlotNotification";
+					pciBlock = {
+						.path = "/System/Library/CoreServices/ExpansionSlotNotification",
+						.callback = genericBlockCallback
+					};
+					memBlock = {
+						.path = "/System/Library/CoreServices/MemorySlotNotification",
+						.callback = genericBlockCallback
+					};
+					procBlacklist[i++] = &pciBlock;
+					procBlacklist[i++] = &memBlock;
 				}
 			}
 		}
@@ -288,7 +327,11 @@ struct RestrictEventsPolicy {
 		if (strstr(value, "gmux", strlen("gmux"))) {
 			if (getKernelVersion() >= KernelVersion::BigSur) {
 				DBGLOG("rev", "disabling displaypolicyd");
-				procBlacklist[i++] = (char *)"/usr/libexec/displaypolicyd";
+				gmuxBlock = {
+					.path = "/usr/libexec/displaypolicyd",
+					.callback = genericBlockCallback
+				};
+				procBlacklist[i++] = &gmuxBlock;
 			}
 		}
 
@@ -296,7 +339,11 @@ struct RestrictEventsPolicy {
 		if (strstr(value, "media", strlen("media"))) {
 			if (getKernelVersion() >= KernelVersion::Ventura) {
 				DBGLOG("rev", "disabling mediaanalysisd");
-				procBlacklist[i++] = (char *)"/System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd";
+				mediaBlock = {
+					.path = "/System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd",
+					.callback = mediaBlockCallback
+				};
+				procBlacklist[i++] = &mediaBlock;
 			}
 		}
 		
@@ -306,13 +353,17 @@ struct RestrictEventsPolicy {
 		if ((!hasSSE42 && strstr(value, "auto", strlen("auto"))) || strstr(value, "telemetry", strlen("telemetry"))) {
 			if (getKernelVersion() >= KernelVersion::Mojave) {
 				DBGLOG("rev", "disabling telemetry plugin");
-				procBlacklist[i++] = (char *)"/System/Library/UserEventPlugins/com.apple.telemetry.plugin/Contents/MacOS/com.apple.telemetry";
+				telemetryBlock = {
+					.path = "/System/Library/UserEventPlugins/com.apple.telemetry.plugin/Contents/MacOS/com.apple.telemetry",
+					.callback = genericBlockCallback
+				};
+				procBlacklist[i++] = &telemetryBlock;
 			}
 		}
 
 		for (auto &proc : procBlacklist) {
 			if (proc == nullptr) break;
-			DBGLOG("rev", "blocking %s", proc);
+			DBGLOG("rev", "blocking %s", proc->path);
 		}
 	}
 
